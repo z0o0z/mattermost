@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/shared/mlog"
@@ -33,6 +34,9 @@ func (api *API) InitAccessControlPolicy() {
 	api.BaseRoutes.AccessControlPolicy.Handle("/unassign", api.APISessionRequired(unassignAccessPolicy)).Methods(http.MethodDelete)
 	api.BaseRoutes.AccessControlPolicy.Handle("/resources/channels", api.APISessionRequired(getChannelsForAccessControlPolicy)).Methods(http.MethodGet)
 	api.BaseRoutes.AccessControlPolicy.Handle("/resources/channels/search", api.APISessionRequired(searchChannelsForAccessControlPolicy)).Methods(http.MethodPost)
+
+	// Activity warning endpoint
+	api.BaseRoutes.AccessControlPolicy.Handle("/activity", api.APISessionRequired(getChannelActivityWarning)).Methods(http.MethodGet)
 }
 
 func createAccessControlPolicy(c *Context, w http.ResponseWriter, r *http.Request) {
@@ -719,3 +723,91 @@ func convertToVisualAST(c *Context, w http.ResponseWriter, r *http.Request) {
 		c.Logger.Warn("Error while writing response", mlog.Err(err))
 	}
 }
+
+// ActivityDelta represents current activity compared to baseline
+type ActivityDelta struct {
+	MessagesDelta     int64   `json:"messages_delta"`
+	MembersDelta      int     `json:"members_delta"`
+	LastActivityHours float64 `json:"last_activity_hours"`
+}
+
+// ActivityWarningResponse represents the response structure for activity warnings
+type ActivityWarningResponse struct {
+	ShouldShowWarning bool           `json:"should_show_warning"`
+	ActivityDelta     *ActivityDelta `json:"activity_delta,omitempty"`
+	Message           string         `json:"message,omitempty"`
+}
+
+
+func getChannelActivityWarning(c *Context, w http.ResponseWriter, r *http.Request) {
+	c.RequirePolicyId()
+	if c.Err != nil {
+		return
+	}
+
+	policyID := c.Params.PolicyId
+	c.Logger.Debug("Activity warning check requested", mlog.String("policy_id", policyID))
+
+	// Validate permissions - only channel admins and system admins can check activity
+	if appErr := c.App.ValidateAccessControlPolicyPermissionWithMode(c.AppContext, c.AppContext.Session().UserId, policyID, true); appErr != nil {
+		c.Logger.Debug("Activity warning permission check failed", mlog.Err(appErr))
+		c.Err = appErr
+		return
+	}
+
+	// Get the policy to ensure it's a channel-type policy
+	policy, appErr := c.App.GetAccessControlPolicy(c.AppContext, policyID)
+	if appErr != nil {
+		c.Logger.Debug("Failed to get policy for activity warning", mlog.Err(appErr))
+		c.Err = appErr
+		return
+	}
+
+	if policy.Type != model.AccessControlPolicyTypeChannel {
+		c.Logger.Debug("Policy is not channel type for activity warning", mlog.String("policy_type", string(policy.Type)))
+		c.SetInvalidParam("policy_type")
+		return
+	}
+
+	c.Logger.Debug("Checking channel activity", mlog.String("channel_id", policy.ID))
+
+	// Check if warning should be shown - for channel policies, the policy ID IS the channel ID
+	shouldWarn, activityDelta, appErr := c.App.ShouldShowChannelActivityWarning(c.AppContext, policy.ID)
+	if appErr != nil {
+		c.Logger.Debug("Activity check failed", mlog.Err(appErr))
+		c.Err = appErr
+		return
+	}
+
+	c.Logger.Debug("Activity check completed", 
+		mlog.Bool("should_warn", shouldWarn), 
+		mlog.Any("activity_delta", activityDelta))
+
+	response := ActivityWarningResponse{
+		ShouldShowWarning: shouldWarn,
+	}
+
+	// Convert app.ActivityDelta to API ActivityDelta if present
+	if activityDelta != nil {
+		response.ActivityDelta = &ActivityDelta{
+			MessagesDelta:     activityDelta.NewMessages,
+			MembersDelta:      activityDelta.NewMembers,
+			LastActivityHours: float64(time.Now().UnixMilli()-activityDelta.LastActivityAt) / (1000 * 3600), // Convert ms to hours
+		}
+	}
+
+	if shouldWarn && activityDelta != nil {
+		response.Message = "Channel has had activity since last rule change"
+	}
+
+	b, err := json.Marshal(response)
+	if err != nil {
+		c.Err = model.NewAppError("getChannelActivityWarning", "api.marshal_error", nil, "", http.StatusInternalServerError).Wrap(err)
+		return
+	}
+
+	if _, err := w.Write(b); err != nil {
+		c.Logger.Warn("Error while writing response", mlog.Err(err))
+	}
+}
+

@@ -4619,6 +4619,21 @@ export default class Client4 {
         );
     };
 
+    getChannelActivityWarning = (policyId: string) => {
+        return this.doFetch<{
+            should_show_warning: boolean;
+            activity_delta?: {
+                new_messages: number;
+                new_members: number;
+                last_activity_at: number;
+            };
+        }>(
+            `${this.getBaseRoute()}/access_control_policies/${policyId}/activity`,
+            {method: 'get'},
+        );
+    };
+
+
     getTeamContentFlaggingStatus = (teamId: string) => {
         return this.doFetch<{enabled: boolean}>(
             `${this.getContentFlaggingRoute()}/team/${teamId}/status`,

@@ -1279,3 +1279,117 @@ func TestIsSystemPolicyAppliedToChannel(t *testing.T) {
 		assert.False(t, result)
 	})
 }
+
+func TestShouldShowChannelActivityWarning(t *testing.T) {
+	th := Setup(t).InitBasic()
+	defer th.TearDown()
+
+	rctx := request.TestContext(t)
+
+	t.Run("should not show warning when no policy exists", func(t *testing.T) {
+		channel := th.CreatePrivateChannel(rctx, th.BasicTeam)
+
+		shouldWarn, activityDelta, err := th.App.ShouldShowChannelActivityWarning(rctx, channel.Id)
+
+		assert.NoError(t, err)
+		assert.False(t, shouldWarn)
+		assert.Nil(t, activityDelta)
+	})
+
+	t.Run("should not show warning when no baseline exists", func(t *testing.T) {
+		channel := th.CreatePrivateChannel(rctx, th.BasicTeam)
+
+		// Create a policy without baseline (simulating policy without rules)
+		policy := &model.AccessControlPolicy{
+			ID:       channel.Id,
+			Name:     "Test Policy",
+			Type:     model.AccessControlPolicyTypeChannel,
+			Active:   true,
+			CreateAt: model.GetMillis(),
+			Revision: 1,
+			Version:  "v0.2",
+			Rules:    []model.AccessControlPolicyRule{},
+			Props:    make(map[string]interface{}),
+		}
+
+		_, err := th.App.CreateOrUpdateAccessControlPolicy(rctx, policy)
+		require.NoError(t, err)
+
+		shouldWarn, activityDelta, err := th.App.ShouldShowChannelActivityWarning(rctx, channel.Id)
+
+		assert.NoError(t, err)
+		assert.False(t, shouldWarn)
+		assert.Nil(t, activityDelta)
+	})
+
+	t.Run("should not show warning when no new messages since baseline", func(t *testing.T) {
+		channel := th.CreatePrivateChannel(rctx, th.BasicTeam)
+
+		// Set message count to 5
+		channel.TotalMsgCount = 5
+		_, err := th.App.UpdateChannel(rctx, channel)
+		require.NoError(t, err)
+
+		// Create policy and set baseline (this will capture current message count of 5)
+		policy := &model.AccessControlPolicy{
+			ID:       channel.Id,
+			Name:     "Test Policy",
+			Type:     model.AccessControlPolicyTypeChannel,
+			Active:   true,
+			CreateAt: model.GetMillis(),
+			Revision: 1,
+			Version:  "v0.2",
+			Rules:    []model.AccessControlPolicyRule{{Expression: "user.department == 'engineering'"}},
+			Props:    make(map[string]interface{}),
+		}
+
+		_, err = th.App.CreateOrUpdateAccessControlPolicy(rctx, policy)
+		require.NoError(t, err)
+
+		// Message count is still 5, so no new messages since baseline
+		shouldWarn, activityDelta, err := th.App.ShouldShowChannelActivityWarning(rctx, channel.Id)
+
+		assert.NoError(t, err)
+		assert.False(t, shouldWarn)
+		assert.Nil(t, activityDelta)
+	})
+
+	t.Run("should show warning when new messages exist since baseline", func(t *testing.T) {
+		channel := th.CreatePrivateChannel(rctx, th.BasicTeam)
+
+		// Set initial message count to 3
+		channel.TotalMsgCount = 3
+		_, err := th.App.UpdateChannel(rctx, channel)
+		require.NoError(t, err)
+
+		// Create policy and set baseline (this will capture current message count of 3)
+		policy := &model.AccessControlPolicy{
+			ID:       channel.Id,
+			Name:     "Test Policy",
+			Type:     model.AccessControlPolicyTypeChannel,
+			Active:   true,
+			CreateAt: model.GetMillis(),
+			Revision: 1,
+			Version:  "v0.2",
+			Rules:    []model.AccessControlPolicyRule{{Expression: "user.department == 'engineering'"}},
+			Props:    make(map[string]interface{}),
+		}
+
+		_, err = th.App.CreateOrUpdateAccessControlPolicy(rctx, policy)
+		require.NoError(t, err)
+
+		// Now simulate new messages (increase to 8)
+		channel.TotalMsgCount = 8
+		channel.LastPostAt = model.GetMillis()
+		_, err = th.App.UpdateChannel(rctx, channel)
+		require.NoError(t, err)
+
+		shouldWarn, activityDelta, err := th.App.ShouldShowChannelActivityWarning(rctx, channel.Id)
+
+		assert.NoError(t, err)
+		assert.True(t, shouldWarn)
+		require.NotNil(t, activityDelta)
+		assert.Equal(t, int64(5), activityDelta.NewMessages) // 8 - 3 = 5 new messages
+		assert.Equal(t, channel.LastPostAt, activityDelta.LastActivityAt)
+	})
+}

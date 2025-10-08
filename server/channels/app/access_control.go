@@ -4,6 +4,7 @@
 package app
 
 import (
+	"encoding/json"
 	"net/http"
 	"slices"
 
@@ -79,10 +80,33 @@ func (a *App) CreateOrUpdateAccessControlPolicy(rctx request.CTX, policy *model.
 		policy.ID = model.NewId()
 	}
 
+	// Check if this is the first time rules are being added to this channel policy
+	var shouldSetBaseline bool
+	if policy.Type == model.AccessControlPolicyTypeChannel {
+		// For channel policies, check if this is the first time rules are being set
+		existingPolicy, _ := a.GetAccessControlPolicy(rctx, policy.ID)
+		if existingPolicy == nil || len(existingPolicy.Rules) == 0 {
+			// This is either a new policy or existing policy with no rules - set baseline if adding rules
+			if len(policy.Rules) > 0 {
+				shouldSetBaseline = true
+			}
+		}
+	}
+
 	var appErr *model.AppError
 	policy, appErr = acs.SavePolicy(rctx, policy)
 	if appErr != nil {
 		return nil, appErr
+	}
+
+	// Set activity baseline for first-time rule creation
+	if shouldSetBaseline {
+		if err := a.SetChannelActivityBaseline(rctx, policy.ID); err != nil {
+			rctx.Logger().Warn("Failed to set channel activity baseline",
+				mlog.String("channel_id", policy.ID),
+				mlog.Err(err))
+			// Don't fail the policy creation if baseline setting fails
+		}
 	}
 
 	return policy, nil
@@ -501,4 +525,225 @@ func (a *App) ValidateExpressionAgainstRequester(rctx request.CTX, expression st
 		return true, nil
 	}
 	return false, nil
+}
+
+// ActivityDelta represents current activity compared to baseline
+type ActivityDelta struct {
+	NewMessages            int64 `json:"new_messages"`
+	NewMembers             int   `json:"new_members"`
+	HasSignificantActivity bool  `json:"has_significant_activity"`
+	LastActivityAt         int64 `json:"last_activity_at"`
+	BaselineTimestamp      int64 `json:"baseline_timestamp"`
+}
+
+// ShouldShowChannelActivityWarning determines if activity warning should be shown for a policy
+// This checks if there have been posts in the channel since the last rule modification
+func (a *App) ShouldShowChannelActivityWarning(rctx request.CTX, channelID string) (bool, *ActivityDelta, *model.AppError) {
+	// Get the timestamp of the last rule modification from policy history
+	lastRuleChangeTimestamp, appErr := a.getLastRuleChangeTimestamp(rctx, channelID)
+	if appErr != nil {
+		return false, nil, appErr
+	}
+
+	if lastRuleChangeTimestamp == 0 {
+		return false, nil, nil
+	}
+
+	// Count posts created after the last rule change
+	postCount, appErr := a.countPostsSinceTimestamp(rctx, channelID, lastRuleChangeTimestamp)
+	if appErr != nil {
+		return false, nil, appErr
+	}
+
+	// Get the most recent post timestamp for activity delta
+	latestPostTimestamp, appErr := a.getLatestPostTimestamp(rctx, channelID, lastRuleChangeTimestamp)
+	if appErr != nil {
+		// Don't fail the warning check if we can't get latest post time
+		latestPostTimestamp = 0
+	}
+
+	// Show warning if there have been posts since the last rule change
+	if postCount > 0 {
+		return true, &ActivityDelta{
+			NewMessages:    postCount,
+			NewMembers:     0, // We don't track member changes currently
+			LastActivityAt: latestPostTimestamp,
+		}, nil
+	}
+
+	return false, nil, nil
+}
+
+// ActivityBaseline represents the baseline activity when rules were first created
+type ActivityBaseline struct {
+	Timestamp    int64 `json:"timestamp"`     // When rules were first created
+	MessageCount int64 `json:"message_count"` // Message count when rules were first created
+}
+
+// getChannelActivityBaseline extracts baseline from policy props
+func (a *App) getChannelActivityBaseline(policy *model.AccessControlPolicy) *ActivityBaseline {
+	if policy.Props == nil {
+		return nil
+	}
+
+	baselineData, exists := policy.Props["abac_activity_baseline"]
+	if !exists {
+		return nil
+	}
+
+	var baseline ActivityBaseline
+	if baselineBytes, ok := baselineData.(string); ok {
+		if err := json.Unmarshal([]byte(baselineBytes), &baseline); err != nil {
+			return nil
+		}
+	} else if baselineMap, ok := baselineData.(map[string]interface{}); ok {
+		// Handle case where it's already unmarshaled as map
+		bytes, _ := json.Marshal(baselineMap)
+		json.Unmarshal(bytes, &baseline)
+	}
+
+	return &baseline
+}
+
+// SetChannelActivityBaseline sets the baseline when rules are first created
+func (a *App) SetChannelActivityBaseline(rctx request.CTX, channelID string) *model.AppError {
+	channel, appErr := a.GetChannel(rctx, channelID)
+	if appErr != nil {
+		return appErr
+	}
+
+	policy, appErr := a.GetAccessControlPolicy(rctx, channelID)
+	if appErr != nil {
+		return appErr
+	}
+
+	// Create baseline
+	baseline := ActivityBaseline{
+		Timestamp:    model.GetMillis(),
+		MessageCount: int64(channel.TotalMsgCount),
+	}
+
+	// Store baseline in policy props
+	if policy.Props == nil {
+		policy.Props = make(map[string]interface{})
+	}
+
+	baselineBytes, _ := json.Marshal(baseline)
+	policy.Props["abac_activity_baseline"] = string(baselineBytes)
+
+	// Save the policy with updated baseline
+	_, appErr = a.CreateOrUpdateAccessControlPolicy(rctx, policy)
+	if appErr != nil {
+		return appErr
+	}
+
+	return nil
+}
+
+// getLastRuleChangeTimestamp finds the most recent rule modification from policy history
+func (a *App) getLastRuleChangeTimestamp(rctx request.CTX, channelID string) (int64, *model.AppError) {
+	// Query policy history to find the most recent rule change
+	policies, err := a.Srv().Store().AccessControlPolicy().GetPolicyHistory(rctx, channelID, 2)
+	if err != nil {
+		return 0, model.NewAppError("getLastRuleChangeTimestamp", "app.access_control.get_policy_history.app_error", nil, err.Error(), http.StatusInternalServerError)
+	}
+
+	if len(policies) == 0 {
+		return 0, nil
+	}
+
+	if len(policies) == 1 {
+		// For the first modification after creation, we should still show warning
+		// Return the creation timestamp so posts after creation are checked
+		return policies[0].CreateAt, nil
+	}
+
+	// We have at least 2 revisions, check if the rules actually changed
+	latest := policies[0]
+	previous := policies[1]
+
+	// Compare the rules to see if they actually changed (not just metadata)
+	if a.policiesHaveDifferentRules(latest, previous) {
+		return latest.CreateAt, nil
+	}
+
+	// No rule changes detected in latest revision
+	return 0, nil
+}
+
+// policiesHaveDifferentRules compares two policies to see if their rules differ
+func (a *App) policiesHaveDifferentRules(policy1, policy2 *model.AccessControlPolicy) bool {
+	// Simple comparison - if rule count differs, they're different
+	if len(policy1.Rules) != len(policy2.Rules) {
+		return true
+	}
+
+	// Compare each rule's expression (this is a simplified comparison)
+	for i, rule1 := range policy1.Rules {
+		if i >= len(policy2.Rules) || rule1.Expression != policy2.Rules[i].Expression {
+			return true
+		}
+	}
+
+	return false
+}
+
+// countPostsSinceTimestamp counts posts in a channel created after a specific timestamp
+func (a *App) countPostsSinceTimestamp(rctx request.CTX, channelID string, timestamp int64) (int64, *model.AppError) {
+	// Use GetPostsSince to get posts after the timestamp, then count posts created after timestamp
+	// Note: GetPostsSince uses UpdateAt, but we need to filter by CreateAt for activity detection
+	options := model.GetPostsSinceOptions{
+		ChannelId: channelID,
+		Time:      timestamp,
+	}
+
+	postList, err := a.Srv().Store().Post().GetPostsSince(rctx, options, false, a.Config().GetSanitizeOptions())
+	if err != nil {
+		return 0, model.NewAppError("countPostsSinceTimestamp", "app.access_control.count_posts.app_error", nil, err.Error(), http.StatusInternalServerError)
+	}
+
+	if postList == nil || len(postList.Posts) == 0 {
+		return 0, nil
+	}
+
+	// Count posts that were actually created after the timestamp
+	// (GetPostsSince uses UpdateAt, so we need to filter by CreateAt)
+	// Only count regular user posts, not system messages (join/leave/etc)
+	var count int64
+	for _, post := range postList.Posts {
+		if post.CreateAt > timestamp && post.Type == "" {
+			count++
+		}
+	}
+
+	return count, nil
+}
+
+// getLatestPostTimestamp gets the most recent post timestamp after a given time
+func (a *App) getLatestPostTimestamp(rctx request.CTX, channelID string, afterTimestamp int64) (int64, *model.AppError) {
+	// Use GetPostsSince to get posts after the timestamp, then find the latest
+	options := model.GetPostsSinceOptions{
+		ChannelId: channelID,
+		Time:      afterTimestamp,
+	}
+
+	postList, err := a.Srv().Store().Post().GetPostsSince(rctx, options, false, a.Config().GetSanitizeOptions())
+	if err != nil {
+		// If no posts found, return 0 (not an error)
+		return 0, nil
+	}
+
+	if postList == nil || len(postList.Posts) == 0 {
+		return 0, nil
+	}
+
+	// Find the most recent post by CreateAt (only regular user posts, not system messages)
+	var latestCreateAt int64
+	for _, post := range postList.Posts {
+		if post.CreateAt > latestCreateAt && post.Type == "" {
+			latestCreateAt = post.CreateAt
+		}
+	}
+
+	return latestCreateAt, nil
 }

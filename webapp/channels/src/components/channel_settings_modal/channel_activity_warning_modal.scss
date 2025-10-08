@@ -1,0 +1,211 @@
+// Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
+// See LICENSE.txt for license information.
+
+.channel-activity-warning-modal {
+    .modal-body {
+        padding: 32px;
+    }
+
+    .channel-activity-warning-content {
+        .warning-header {
+            display: flex;
+            align-items: flex-start;
+            margin-bottom: 20px;
+            gap: 16px;
+
+            .warning-icon {
+                width: 32px;
+                height: 32px;
+                flex-shrink: 0;
+                margin-top: 2px;
+                color: var(--away-indicator);
+                font-size: 32px;
+            }
+
+            .warning-title {
+                flex: 1;
+                margin: 0;
+                color: var(--center-channel-color);
+                font-family: Metropolis, sans-serif;
+                font-size: 18px;
+                font-weight: 600;
+                line-height: 24px;
+            }
+        }
+
+        .warning-description {
+            margin-bottom: 24px;
+            color: var(--center-channel-color);
+            font-family: 'Open Sans', sans-serif;
+            font-size: 14px;
+            font-weight: 400;
+            line-height: 20px;
+        }
+
+        .activity-summary {
+            padding: 20px;
+            border: 1px solid rgba(var(--away-indicator-rgb), 0.16);
+            border-radius: 8px;
+            border-left: 4px solid var(--away-indicator);
+            margin-bottom: 24px;
+            background: rgba(var(--away-indicator-rgb), 0.04);
+
+            .activity-item {
+                margin-bottom: 12px;
+                color: var(--center-channel-color);
+                font-family: 'Open Sans', sans-serif;
+                font-size: 14px;
+                line-height: 20px;
+
+                &:last-child {
+                    margin-bottom: 0;
+                }
+
+                strong {
+                    color: var(--center-channel-color);
+                    font-weight: 600;
+                }
+            }
+        }
+
+        .dont-show-again-container {
+            padding-top: 20px;
+            border-top: 1px solid rgba(var(--center-channel-color-rgb), 0.16);
+
+            .dont-show-again-checkbox-container {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+            }
+
+            .dont-show-again-checkbox {
+                // Use the same styling as channel settings auto-sync checkbox
+                display: grid;
+                width: 1.6rem;
+                height: 1.6rem;
+                flex-shrink: 0;
+                border: 1px solid rgba(var(--center-channel-color-rgb), 0.24);
+                border-radius: 3px;
+                margin: 0;
+                -webkit-appearance: none;
+                appearance: none;
+                background-color: transparent;
+                color: rgba(var(--center-channel-color-rgb), 0.24);
+                cursor: pointer;
+                font: inherit;
+                place-content: center;
+                -webkit-transition: all 200ms ease-out;
+                -moz-transition: all 200ms ease-out;
+                -o-transition: all 200ms ease-out;
+                transition: all 200ms ease-out;
+
+                &::before {
+                    width: 10px;
+                    height: 10px;
+                    background: var(--button-color);
+                    clip-path: polygon(0% 57%, 32% 88%, 100% 20%, 88% 8%, 32% 64%, 12% 45%);
+                    content: '';
+                    transform: scale(0);
+                    transform-origin: center center;
+                    transition: 200ms transform ease-in-out;
+                }
+
+                &:checked::before {
+                    transform: scale(1);
+                }
+
+                &:checked {
+                    border-color: var(--button-bg);
+                    background: var(--button-bg);
+                }
+
+                &:hover {
+                    border-color: rgba(var(--center-channel-color-rgb), 0.4);
+                }
+
+                &:focus {
+                    outline: 2px solid rgba(var(--button-bg-rgb), 0.2);
+                    outline-offset: 2px;
+                }
+
+                &:disabled {
+                    cursor: not-allowed;
+                    opacity: 0.5;
+                }
+            }
+
+            .dont-show-again-label {
+                display: flex;
+                align-items: center;
+                margin: 0;
+                cursor: pointer;
+                user-select: none;
+
+                &:hover .dont-show-again-text {
+                    color: var(--center-channel-color);
+                }
+            }
+
+            .dont-show-again-text {
+                color: rgba(var(--center-channel-color-rgb), 0.72);
+                font-family: 'Open Sans', sans-serif;
+                font-size: 14px;
+                font-weight: 400;
+                line-height: 20px;
+                transition: color 0.15s ease;
+            }
+        }
+    }
+
+    // Enhanced modal styling
+    .GenericModal__header__text_container {
+        .GenericModal__header {
+            color: var(--center-channel-color);
+            font-family: Metropolis, sans-serif;
+            font-size: 22px;
+            font-weight: 600;
+            line-height: 28px;
+        }
+    }
+
+    // Button styling consistency
+    .GenericModal__button {
+        padding: 10px 20px;
+        border-radius: 4px;
+        font-family: 'Open Sans', sans-serif;
+        font-size: 14px;
+        font-weight: 600;
+        line-height: 20px;
+        transition: all 0.15s ease;
+
+        &.btn-primary {
+            border-color: var(--button-bg);
+            background: var(--button-bg);
+            color: var(--button-color);
+
+            &:hover {
+                border-color: rgba(var(--button-bg-rgb), 0.88);
+                background: rgba(var(--button-bg-rgb), 0.88);
+            }
+
+            &:focus {
+                box-shadow: 0 0 0 2px rgba(var(--button-bg-rgb), 0.2);
+            }
+        }
+
+        &.btn-tertiary {
+            border: 1px solid rgba(var(--center-channel-color-rgb), 0.24);
+            background: transparent;
+            color: var(--center-channel-color);
+
+            &:hover {
+                border-color: rgba(var(--center-channel-color-rgb), 0.4);
+                background: rgba(var(--center-channel-color-rgb), 0.08);
+            }
+
+            &:focus {
+                box-shadow: 0 0 0 2px rgba(var(--center-channel-color-rgb), 0.16);
+            }
+        }
+    }
+}
